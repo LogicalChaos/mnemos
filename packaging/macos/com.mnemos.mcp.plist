@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  mnemos MCP persistent daemon — macOS launchd agent
+
+  Running mnemos as a persistent daemon (rather than a per-session stdio process)
+  preserves the in-memory episodic buffer across Claude/Cursor/Windsurf sessions,
+  allowing the SleepDaemon to accumulate enough episodes to run consolidation.
+
+  INSTALL
+  -------
+  1. Copy this file to ~/Library/LaunchAgents/com.mnemos.mcp.plist
+  2. Replace YOUR_USERNAME with your macOS username (echo $USER)
+  3. Adjust PYENV_VERSION to match your active Python version
+  4. Set MNEMOS_CONFIG_PATH to your mnemos.toml location (run: mnemos-cli config path)
+  5. Load the agent:
+       launchctl load ~/Library/LaunchAgents/com.mnemos.mcp.plist
+  6. Update your Claude / Cursor / Windsurf MCP config to use the URL transport
+     instead of the command transport — see docs/mcp-configs/ for examples.
+
+  VERIFY
+  ------
+  curl http://127.0.0.1:8765/sse          # should return HTTP 200
+  tail -f ~/Library/Logs/mnemos-mcp.log   # live log output
+
+  UNINSTALL
+  ---------
+  launchctl unload ~/Library/LaunchAgents/com.mnemos.mcp.plist
+  rm ~/Library/LaunchAgents/com.mnemos.mcp.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mnemos.mcp</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOUR_USERNAME/.pyenv/shims/mnemos-mcp</string>
+        <string>--transport</string>
+        <string>sse</string>
+        <string>--port</string>
+        <string>8765</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MNEMOS_CONFIG_PATH</key>
+        <string>/Users/YOUR_USERNAME/Library/Application Support/Mnemos/mnemos.toml</string>
+        <key>PATH</key>
+        <string>/Users/YOUR_USERNAME/.pyenv/shims:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYENV_VERSION</key>
+        <string>3.13.0</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/mnemos-mcp.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Logs/mnemos-mcp.log</string>
+</dict>
+</plist>
