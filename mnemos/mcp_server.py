@@ -248,7 +248,7 @@ class MnemosContext:
 # ---------------------------------------------------------------------------
 
 
-def create_mcp_server() -> Any:
+def create_mcp_server(host: str = "127.0.0.1", port: int = 8765) -> Any:
     """Create and configure the MCP server with all mnemos tools and resources."""
     try:
         from mcp.server.fastmcp import Context, FastMCP
@@ -301,6 +301,8 @@ def create_mcp_server() -> Any:
         "Mnemos",
         dependencies=["mnemos", "numpy", "pydantic"],
         lifespan=mnemos_lifespan,
+        host=host,
+        port=port,
     )
 
     def _engine_from_ctx(
@@ -704,11 +706,40 @@ def create_mcp_server() -> Any:
 
 
 def main() -> None:
-    """Run the MCP server via stdio transport (for Claude Code, Cursor, etc.)."""
+    """Run the MCP server via stdio (default) or HTTP/SSE transport.
+
+    Pass --transport sse --port PORT to run as a persistent daemon that
+    preserves the in-memory episodic buffer across Claude sessions.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Mnemos MCP server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse", "streamable-http"],
+        default="stdio",
+        help="MCP transport (default: stdio)",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind host for HTTP transports (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="Bind port for HTTP transports (default: 8765)",
+    )
+    args = parser.parse_args()
+
     configure_logging()
     try:
-        mcp = create_mcp_server()
-        mcp.run(transport="stdio")
+        mcp = create_mcp_server(host=args.host, port=args.port)
+        if args.transport == "stdio":
+            mcp.run(transport="stdio")
+        else:
+            mcp.run(transport=args.transport)
     except Exception as exc:
         print(_format_startup_error(exc), file=sys.stderr)
         raise SystemExit(1) from None

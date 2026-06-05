@@ -154,12 +154,14 @@ def build_llm_from_settings(settings: AppSettings) -> LLMProvider:
 
 
 def build_mnemos_config_from_settings(settings: AppSettings) -> MnemosConfig:
+    from .config import SleepConfig  # local import to avoid circular at module level
     return MnemosConfig(
         surprisal=SurprisalConfig(threshold=settings.runtime.surprisal_threshold),
         safety=MemorySafetyConfig.model_validate(settings.safety.model_dump(mode="python")),
         governance=MemoryGovernanceConfig.model_validate(
             settings.governance.model_dump(mode="python")
         ),
+        sleep=SleepConfig(recall_gated_plasticity_enabled=True),
         debug=settings.runtime.debug,
     )
 
