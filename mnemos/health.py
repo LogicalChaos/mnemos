@@ -37,6 +37,42 @@ def _module_available(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
 
 
+def _sqlite_vec_loadable() -> tuple[bool, str]:
+    """Report whether sqlite-vec can actually accelerate this interpreter.
+
+    Mirrors SQLiteStore._load_sqlite_vec_extension: the module must import AND
+    the C extension must load into a connection. Module importability alone
+    overstates capability on interpreters whose sqlite3 was built without
+    loadable-extension support (no Connection.enable_load_extension — common
+    for pyenv/framework Python builds on macOS), which is exactly the case
+    where the store silently falls back to the Python similarity scan.
+    """
+    if not _module_available("sqlite_vec"):
+        return False, "sqlite-vec is not installed"
+    try:
+        import sqlite_vec
+    except ImportError as exc:  # pragma: no cover - find_spec passed but import failed
+        return False, f"sqlite-vec import failed: {exc}"
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        enable_extension = getattr(conn, "enable_load_extension", None)
+        if not callable(enable_extension):
+            return False, (
+                "python sqlite3 lacks enable_load_extension (interpreter built "
+                "without --enable-loadable-sqlite-extensions)"
+            )
+        try:
+            enable_extension(True)
+            sqlite_vec.load(conn)
+            enable_extension(False)
+        except Exception as exc:
+            return False, f"sqlite-vec extension failed to load: {exc}"
+        return True, "sqlite-vec loaded into a test connection"
+    finally:
+        conn.close()
+
+
 def _safe_int(value: str | None, default: int) -> int:
     if value is None or value == "":
         return default
@@ -197,18 +233,19 @@ def run_health_checks(
         sqlite_db_path = Path(sqlite_path).expanduser().resolve()
         sqlite_chunk_count = _sqlite_chunk_count(sqlite_db_path)
         legacy_unscoped_chunks = _sqlite_legacy_unscoped_chunk_count(sqlite_db_path)
-        sqlite_vec_enabled = _module_available("sqlite_vec")
+        sqlite_vec_enabled, sqlite_vec_reason = _sqlite_vec_loadable()
         if sqlite_vec_enabled:
             add_check(
                 "store.sqlite.vec",
                 "pass",
-                "sqlite-vec dependency available for in-process vector acceleration.",
+                "sqlite-vec loads in this interpreter; in-process vector acceleration active.",
             )
         else:
             add_check(
                 "store.sqlite.vec",
                 "warn",
-                "sqlite-vec is not installed; SQLite retrieval will fall back to Python similarity scan.",
+                f"sqlite-vec acceleration unavailable ({sqlite_vec_reason}); "
+                "SQLite retrieval will fall back to Python similarity scan.",
             )
     else:
         add_check("store.type", "fail", f"Unsupported MNEMOS_STORE_TYPE: {store_type!r}")

@@ -20,6 +20,7 @@ All backends implement the same interface, so you can swap them transparently.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from abc import ABC, abstractmethod
@@ -29,6 +30,8 @@ from typing import Any, cast
 
 from ..types import CognitiveState, MemoryChunk, RetrievalFeedbackEvent
 from .embeddings import cosine_similarity
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryStore(ABC):
@@ -464,24 +467,42 @@ class SQLiteStore(MemoryStore):
         self._initialize_schema()
 
     def _load_sqlite_vec_extension(self) -> None:
+        # Degrading to the Python similarity scan is always safe, but each
+        # branch logs WHY so a disabled acceleration is visible at startup
+        # instead of only being discoverable by diffing health vs. stats.
         try:
             import sqlite_vec
         except ImportError:
+            logger.info(
+                "sqlite-vec not installed; SQLite vector acceleration disabled "
+                "(falling back to Python similarity scan)"
+            )
             return
 
         enable_extension = getattr(self._conn, "enable_load_extension", None)
         if not callable(enable_extension):
+            logger.warning(
+                "sqlite-vec is installed but this Python's sqlite3 lacks "
+                "enable_load_extension (interpreter built without "
+                "--enable-loadable-sqlite-extensions); vector acceleration "
+                "disabled, falling back to Python similarity scan"
+            )
             return
 
         try:
             enable_extension(True)
             sqlite_vec.load(self._conn)
             enable_extension(False)
-        except Exception:
+        except Exception as exc:
             try:
                 enable_extension(False)
             except Exception:
                 pass
+            logger.warning(
+                "sqlite-vec extension failed to load: %s; vector acceleration "
+                "disabled, falling back to Python similarity scan",
+                exc,
+            )
             return
 
         self._sqlite_vec_enabled = True

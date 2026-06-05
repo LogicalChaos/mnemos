@@ -213,15 +213,54 @@ def test_health_reports_single_local_backend_story(
 def test_health_reports_sqlite_vec_acceleration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # Mock the load probe rather than relying on the test interpreter's
+    # sqlite3 build: importability alone is NOT the contract — the probe
+    # must report the extension actually loads (see _sqlite_vec_loadable).
     db_path = tmp_path / "mnemos_vec_health.db"
     monkeypatch.setenv("MNEMOS_STORE_TYPE", "sqlite")
     monkeypatch.setenv("MNEMOS_SQLITE_PATH", str(db_path))
     monkeypatch.setenv("MNEMOS_LLM_PROVIDER", "openclaw")
     monkeypatch.setenv("MNEMOS_OPENCLAW_API_KEY", "test-key")
     monkeypatch.setenv("MNEMOS_EMBEDDING_PROVIDER", "openclaw")
+    monkeypatch.setattr(
+        "mnemos.health._sqlite_vec_loadable",
+        lambda: (True, "sqlite-vec loaded into a test connection"),
+    )
 
     report = run_health_checks()
 
     assert report["vector_acceleration"]["enabled"] is True
     assert report["vector_acceleration"]["provider"] == "sqlite-vec"
-    assert any(check["name"] == "store.sqlite.vec" for check in report["checks"])
+    vec_checks = [check for check in report["checks"] if check["name"] == "store.sqlite.vec"]
+    assert vec_checks and vec_checks[0]["status"] == "pass"
+
+
+def test_health_sqlite_vec_importable_but_not_loadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The regression this guards: module installed, but the interpreter's
+    # sqlite3 lacks enable_load_extension (e.g. pyenv build without
+    # --enable-loadable-sqlite-extensions). Health must NOT report
+    # acceleration enabled when the store would silently fall back.
+    db_path = tmp_path / "mnemos_vec_health_noload.db"
+    monkeypatch.setenv("MNEMOS_STORE_TYPE", "sqlite")
+    monkeypatch.setenv("MNEMOS_SQLITE_PATH", str(db_path))
+    monkeypatch.setenv("MNEMOS_LLM_PROVIDER", "openclaw")
+    monkeypatch.setenv("MNEMOS_OPENCLAW_API_KEY", "test-key")
+    monkeypatch.setenv("MNEMOS_EMBEDDING_PROVIDER", "openclaw")
+    reason = (
+        "python sqlite3 lacks enable_load_extension (interpreter built "
+        "without --enable-loadable-sqlite-extensions)"
+    )
+    monkeypatch.setattr(
+        "mnemos.health._sqlite_vec_loadable",
+        lambda: (False, reason),
+    )
+
+    report = run_health_checks()
+
+    assert report["vector_acceleration"]["enabled"] is False
+    assert report["vector_acceleration"]["provider"] is None
+    vec_checks = [check for check in report["checks"] if check["name"] == "store.sqlite.vec"]
+    assert vec_checks and vec_checks[0]["status"] == "warn"
+    assert "enable_load_extension" in vec_checks[0]["message"]
