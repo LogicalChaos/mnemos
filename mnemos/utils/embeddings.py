@@ -24,6 +24,7 @@ import re
 import threading
 from abc import ABC, abstractmethod
 from collections import Counter
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -607,7 +608,62 @@ async def embed_batch_async(embedder: EmbeddingProvider, texts: list[str]) -> li
     return await asyncio.to_thread(embedder.embed_batch, texts)
 
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
+def cosine_similarity_batch(
+    query: Sequence[float] | np.ndarray,
+    candidates: Sequence[Sequence[float] | np.ndarray],
+) -> list[float]:
+    """
+    Cosine similarity of one vector against many, in a single vectorized pass.
+
+    Equivalent to ``[cosine_similarity(query, c) for c in candidates]`` but the
+    query is converted once and the candidates are stacked into one matrix, so
+    the work becomes a single BLAS matrix-vector product instead of one small
+    dot product per candidate. Scanning loops over the whole corpus (graph edge
+    building, retrieval ranking) should prefer this: the per-call
+    ``np.asarray`` conversion of Python float lists, not the arithmetic, is
+    what dominates those loops.
+
+    Args:
+        query: The vector to compare against every candidate.
+        candidates: Sequence of equal-length vectors.
+
+    Returns:
+        One similarity in [-1, 1] per candidate, in the order given. A
+        zero-norm query or candidate yields 0.0, matching cosine_similarity.
+
+    Raises:
+        ValueError: If the candidates are ragged or their width does not match
+            the query's length.
+    """
+    if len(candidates) == 0:
+        return []
+
+    q = np.asarray(query, dtype=np.float32)
+    matrix = np.asarray(candidates, dtype=np.float32)
+    if matrix.ndim != 2:
+        raise ValueError(
+            f"Candidate vectors must all be the same length; got array of shape {matrix.shape}"
+        )
+    if matrix.shape[1] != q.shape[0]:
+        raise ValueError(
+            f"Vector dimension mismatch: len(query)={q.shape[0]}, "
+            f"candidate width={matrix.shape[1]}"
+        )
+
+    q_norm = float(np.linalg.norm(q))
+    if q_norm == 0.0:
+        return [0.0] * matrix.shape[0]
+
+    norms = np.linalg.norm(matrix, axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sims = (matrix @ q) / (norms * q_norm)
+    sims[norms == 0.0] = 0.0
+    return [float(value) for value in sims]
+
+
+def cosine_similarity(
+    a: Sequence[float] | np.ndarray, b: Sequence[float] | np.ndarray
+) -> float:
     """
     Compute cosine similarity between two embedding vectors.
 
@@ -630,8 +686,10 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     """
     if len(a) != len(b):
         raise ValueError(f"Vector dimension mismatch: len(a)={len(a)}, len(b)={len(b)}")
-    va = np.array(a, dtype=np.float32)
-    vb = np.array(b, dtype=np.float32)
+    # asarray, not array: already-ndarray inputs are then zero-copy. Callers
+    # scanning the whole corpus should use cosine_similarity_batch instead.
+    va = np.asarray(a, dtype=np.float32)
+    vb = np.asarray(b, dtype=np.float32)
     norm_a = np.linalg.norm(va)
     norm_b = np.linalg.norm(vb)
     if norm_a == 0 or norm_b == 0:

@@ -40,7 +40,9 @@ from typing import Any
 
 from ..config import SpreadingConfig
 from ..types import ActivationNode, MemoryChunk
-from ..utils.embeddings import EmbeddingProvider, cosine_similarity
+import numpy as np
+
+from ..utils.embeddings import EmbeddingProvider, cosine_similarity_batch
 
 
 class SpreadingActivation:
@@ -66,6 +68,11 @@ class SpreadingActivation:
         self._config = config or SpreadingConfig()
         # Node storage: node_id → ActivationNode
         self._nodes: dict[str, ActivationNode] = {}
+        # node_id → embedding as a float32 array. Converting a node's Python
+        # float list to an array costs far more than the similarity arithmetic
+        # itself, and every scan re-reads the same embeddings, so the converted
+        # form is cached and invalidated wherever _nodes is mutated.
+        self._vector_cache: dict[str, np.ndarray] = {}
         # Stats
         self._total_activations: int = 0
 
@@ -105,7 +112,16 @@ class SpreadingActivation:
             metadata=dict(metadata or {}),
         )
         self._nodes[nid] = node
+        self._vector_cache.pop(nid, None)
         return node
+
+    def _vector(self, node: ActivationNode) -> np.ndarray:
+        """Return this node's embedding as a float32 array, converting once."""
+        cached = self._vector_cache.get(node.id)
+        if cached is None:
+            cached = np.asarray(node.embedding, dtype=np.float32)
+            self._vector_cache[node.id] = cached
+        return cached
 
     def add_node_from_chunk(self, chunk: MemoryChunk) -> ActivationNode:
         """
@@ -245,15 +261,21 @@ class SpreadingActivation:
         limit = self._max_neighbors()
         self.clear_edges(node_id)
 
-        candidates: list[tuple[float, str]] = []
-        for other in self._nodes.values():
-            if other.id == node_id or other.embedding is None:
-                continue
-            if not self._nodes_can_connect(node, other):
-                continue
-            similarity = cosine_similarity(node.embedding, other.embedding)
-            if similarity >= thresh:
-                candidates.append((similarity, other.id))
+        eligible = [
+            other
+            for other in self._nodes.values()
+            if other.id != node_id
+            and other.embedding is not None
+            and self._nodes_can_connect(node, other)
+        ]
+        similarities = cosine_similarity_batch(
+            self._vector(node), [self._vector(other) for other in eligible]
+        )
+        candidates: list[tuple[float, str]] = [
+            (similarity, other.id)
+            for similarity, other in zip(similarities, eligible)
+            if similarity >= thresh
+        ]
 
         edges_added = 0
         for similarity, other_id in sorted(candidates, key=lambda item: item[0], reverse=True):
@@ -336,17 +358,24 @@ class SpreadingActivation:
         if not exclude_existing:
             self.clear_all_edges()
 
-        node_list = list(self._nodes.values())
+        # Still all-pairs, but scored a row at a time so each row is one
+        # vectorized pass rather than one Python-level conversion per pair.
+        node_list = [node for node in self._nodes.values() if node.embedding is not None]
         candidates: list[tuple[float, str, str]] = []
         for i, node_a in enumerate(node_list):
-            for node_b in node_list[i + 1 :]:
-                if node_a.embedding is None or node_b.embedding is None:
-                    continue
-                if not self._nodes_can_connect(node_a, node_b):
-                    continue
-                sim = cosine_similarity(node_a.embedding, node_b.embedding)
-                if sim >= thresh:
-                    candidates.append((sim, node_a.id, node_b.id))
+            partners = [
+                node_b
+                for node_b in node_list[i + 1 :]
+                if self._nodes_can_connect(node_a, node_b)
+            ]
+            similarities = cosine_similarity_batch(
+                self._vector(node_a), [self._vector(node_b) for node_b in partners]
+            )
+            candidates.extend(
+                (sim, node_a.id, node_b.id)
+                for sim, node_b in zip(similarities, partners)
+                if sim >= thresh
+            )
 
         return self._apply_candidate_pairs(candidates, exclude_existing=exclude_existing)
 
@@ -456,10 +485,11 @@ class SpreadingActivation:
         best_sim = -1.0
         best_node_id = None
 
-        for node in self._nodes.values():
-            if node.embedding is None:
-                continue
-            sim = cosine_similarity(query_embedding, node.embedding)
+        embedded_nodes = [node for node in self._nodes.values() if node.embedding is not None]
+        similarities = cosine_similarity_batch(
+            query_embedding, [self._vector(node) for node in embedded_nodes]
+        )
+        for sim, node in zip(similarities, embedded_nodes):
             if sim > best_sim:
                 best_sim = sim
                 best_node_id = node.id
@@ -526,6 +556,7 @@ class SpreadingActivation:
             return False
 
         del self._nodes[node_id]
+        self._vector_cache.pop(node_id, None)
 
         # Remove all incoming edges from other nodes
         for node in self._nodes.values():

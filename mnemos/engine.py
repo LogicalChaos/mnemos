@@ -246,6 +246,11 @@ class MnemosEngine:
             config=self.config.spreading,
         )
 
+        # Serializes graph mutation. Edge building is synchronous CPU work that
+        # is offloaded with asyncio.to_thread, so concurrent callers must not
+        # interleave their reads and writes of the node/edge tables.
+        self._graph_lock = asyncio.Lock()
+
         # Rebuild associative graph from persisted storage so retrieval
         # keeps working across process restarts.
         self._hydrate_spreading_graph_from_store()
@@ -268,6 +273,17 @@ class MnemosEngine:
     def _sync_persisted_graph_edges(self) -> None:
         for node in self.spreading_activation.get_all_nodes():
             self._store.replace_graph_neighbors(node.id, dict(node.neighbors))
+
+    def _connect_nodes(self, node_ids: list[str]) -> None:
+        """
+        Connect each named node to its strongest eligible neighbors.
+
+        Synchronous CPU work: each call scans every node in the graph. Callers
+        run this under _graph_lock via asyncio.to_thread so it does not block
+        the event loop.
+        """
+        for node_id in node_ids:
+            self.spreading_activation.connect_node(node_id)
 
     def _apply_governance(
         self,
@@ -440,12 +456,16 @@ class MnemosEngine:
         self._store.update(result.chunk.id, result.chunk)
 
         # Step 3: Add to spreading activation graph
-        self.spreading_activation.add_node_from_chunk(result.chunk)
-
+        #
         # Connect the new node to its strongest eligible scoped neighbors and
         # persist the resulting sparse graph when the backend supports it.
-        self.spreading_activation.connect_node(result.chunk.id)
-        self._sync_persisted_graph_edges()
+        # connect_node scans every existing node, so it is offloaded rather
+        # than run on the event loop; the lock keeps concurrent callers from
+        # interleaving graph mutations across threads.
+        async with self._graph_lock:
+            self.spreading_activation.add_node_from_chunk(result.chunk)
+            await asyncio.to_thread(self.spreading_activation.connect_node, result.chunk.id)
+            self._sync_persisted_graph_edges()
 
         if self.config.debug:
             logger.debug(
@@ -661,19 +681,30 @@ class MnemosEngine:
             embedder=self._embedder,
         )
 
-        # Add consolidated chunks to the spreading activation graph
-        new_chunks = self._store.get_all()
-        for chunk in new_chunks:
-            if (
-                chunk.metadata.get("source") == "sleep_consolidation"
-                and self.spreading_activation.get_node(chunk.id) is None
-            ):
-                self.spreading_activation.add_node_from_chunk(chunk)
+        # Add consolidated chunks to the spreading activation graph and connect
+        # only the nodes this cycle actually created.
+        #
+        # This deliberately mirrors the single-chunk path in process(): one
+        # connect_node call per new node, which is O(new x existing). The
+        # previous auto_connect(exclude_existing=False) cleared every edge and
+        # rebuilt the whole graph all-pairs, which is O(existing^2) and grew
+        # quadratically with the corpus until a single consolidation could hold
+        # the event loop for minutes. It also fired on almost every cycle,
+        # because the list it was gated on was the entire store rather than the
+        # newly added chunks.
+        async with self._graph_lock:
+            newly_connected: list[str] = []
+            for chunk in self._store.get_all():
+                if (
+                    chunk.metadata.get("source") == "sleep_consolidation"
+                    and self.spreading_activation.get_node(chunk.id) is None
+                ):
+                    self.spreading_activation.add_node_from_chunk(chunk)
+                    newly_connected.append(chunk.id)
 
-        # Rebuild connections for newly added nodes
-        if new_chunks:
-            self.spreading_activation.auto_connect(exclude_existing=False)
-            self._sync_persisted_graph_edges()
+            if newly_connected:
+                await asyncio.to_thread(self._connect_nodes, newly_connected)
+                self._sync_persisted_graph_edges()
 
         self._apply_governance()
 

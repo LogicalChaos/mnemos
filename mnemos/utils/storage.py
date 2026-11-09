@@ -29,9 +29,40 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from ..types import CognitiveState, MemoryChunk, RetrievalFeedbackEvent
-from .embeddings import cosine_similarity
+from .embeddings import cosine_similarity_batch
 
 logger = logging.getLogger(__name__)
+
+
+def _score_against_query(
+    chunks: list[MemoryChunk], query_embedding: list[float]
+) -> list[tuple[float, MemoryChunk]]:
+    """
+    Score every chunk against one query embedding, in chunk order.
+
+    Chunks with no embedding, or with an embedding of a different width, score
+    0.0 — unembedded content is not searchable but must not raise. The
+    comparable chunks are scored in a single vectorized pass, which matters
+    because this runs over the whole corpus on every retrieval.
+
+    Order is preserved so that callers relying on Python's stable sort keep
+    their original tie-breaking between equally-scored chunks.
+    """
+    comparable_positions: list[int] = []
+    comparable_embeddings: list[list[float]] = []
+    for position, chunk in enumerate(chunks):
+        if chunk.embedding is not None and len(chunk.embedding) == len(query_embedding):
+            comparable_positions.append(position)
+            comparable_embeddings.append(chunk.embedding)
+
+    similarities = [0.0] * len(chunks)
+    for position, similarity in zip(
+        comparable_positions,
+        cosine_similarity_batch(query_embedding, comparable_embeddings),
+    ):
+        similarities[position] = similarity
+
+    return list(zip(similarities, chunks))
 
 
 class MemoryStore(ABC):
@@ -228,14 +259,7 @@ class InMemoryStore(MemoryStore):
         if filter_fn is not None:
             candidates = [c for c in candidates if filter_fn(c)]
 
-        scored: list[tuple[float, MemoryChunk]] = []
-        for chunk in candidates:
-            if chunk.embedding is not None and len(chunk.embedding) == len(query_embedding):
-                sim = cosine_similarity(query_embedding, chunk.embedding)
-            else:
-                sim = 0.0
-            scored.append((sim, chunk))
-
+        scored = _score_against_query(candidates, query_embedding)
         scored.sort(key=lambda x: x[0], reverse=True)
         return [chunk for _, chunk in scored[:top_k]]
 
@@ -811,14 +835,7 @@ class SQLiteStore(MemoryStore):
         if filter_fn is not None:
             all_chunks = [c for c in all_chunks if filter_fn(c)]
 
-        scored: list[tuple[float, MemoryChunk]] = []
-        for chunk in all_chunks:
-            if chunk.embedding is not None and len(chunk.embedding) == len(query_embedding):
-                sim = cosine_similarity(query_embedding, chunk.embedding)
-            else:
-                sim = 0.0
-            scored.append((sim, chunk))
-
+        scored = _score_against_query(all_chunks, query_embedding)
         scored.sort(key=lambda x: x[0], reverse=True)
         return [chunk for _, chunk in scored[:top_k]]
 
