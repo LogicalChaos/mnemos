@@ -388,7 +388,7 @@ def create_mcp_server(host: str = "127.0.0.1", port: int = 8765) -> Any:
     async def mnemos_retrieve(
         query: str,
         top_k: int = 5,
-        reconsolidate: bool = True,
+        reconsolidate: bool = False,
         current_scope: str = "project",
         scope_id: str = "default",
         allowed_scopes: str = "project,workspace,global",

@@ -154,14 +154,21 @@ def build_llm_from_settings(settings: AppSettings) -> LLMProvider:
 
 
 def build_mnemos_config_from_settings(settings: AppSettings) -> MnemosConfig:
-    from .config import SleepConfig  # local import to avoid circular at module level
+    from .config import MutableRAGConfig, SleepConfig  # local import to avoid circular at module level
     return MnemosConfig(
         surprisal=SurprisalConfig(threshold=settings.runtime.surprisal_threshold),
         safety=MemorySafetyConfig.model_validate(settings.safety.model_dump(mode="python")),
         governance=MemoryGovernanceConfig.model_validate(
             settings.governance.model_dump(mode="python")
         ),
-        sleep=SleepConfig(recall_gated_plasticity_enabled=True),
+        sleep=SleepConfig(
+            recall_gated_plasticity_enabled=True,
+            min_episodes_before_consolidation=5,
+        ),
+        # Reconsolidation disabled: it fed the retrieval query to the LLM as "new context"
+        # and rewrote memories to assert the query's content (b4f54673 grew 8 versions of
+        # false alarms). These memories are factual records, not evolving beliefs.
+        mutable_rag=MutableRAGConfig(enabled=False),
         debug=settings.runtime.debug,
     )
 

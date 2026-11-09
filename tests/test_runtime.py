@@ -139,3 +139,17 @@ def test_build_store_from_env_rejects_legacy_store_types(
     monkeypatch.setenv("MNEMOS_STORE_TYPE", "neo4j")
     with pytest.raises(Exception, match="storage.type"):
         build_store_from_env(default_store_type="memory")
+
+
+def test_local_patches_disable_reconsolidation_and_enable_recall_gating() -> None:
+    """Local patches (LogicalChaos fork): MutableRAG reconsolidation off, recall gating on.
+
+    Reconsolidation rewrote memories using the retrieval query as "new context", so it
+    must stay disabled; recall-gated plasticity must stay enabled for consolidation.
+    """
+    from mnemos.runtime import build_mnemos_config_from_settings
+    from mnemos.settings import AppSettings
+
+    config = build_mnemos_config_from_settings(AppSettings())
+    assert config.mutable_rag.enabled is False
+    assert config.sleep.recall_gated_plasticity_enabled is True
