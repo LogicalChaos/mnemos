@@ -10,6 +10,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 from mcp import ClientSession
@@ -50,6 +51,28 @@ def _call_result_text(result: Any) -> str:
         if isinstance(text, str):
             texts.append(text)
     return "\n".join(texts)
+
+
+def _assert_streamable_http_spec(spec: dict[str, Any]) -> None:
+    """
+    Validate a server spec that points at an already-running HTTP endpoint.
+
+    A url-form spec has no subprocess to launch, so it cannot be exercised by
+    the stdio round-trip. Check the shape instead: a well-formed streamable-http
+    endpoint, and no leftover stdio keys alongside it.
+    """
+    url = spec.get("url")
+    assert isinstance(url, str) and url, f"http server spec needs a non-empty url, got {spec!r}"
+
+    parsed = urlparse(url)
+    assert parsed.scheme in {"http", "https"}, f"unexpected scheme in {url!r}"
+    assert parsed.hostname, f"no host in {url!r}"
+    assert parsed.path.rstrip("/").endswith("/mcp"), (
+        f"streamable-http endpoint should end with /mcp, got {url!r}"
+    )
+    assert "command" not in spec and "args" not in spec, (
+        f"server spec mixes stdio (command/args) and http (url) transports: {spec!r}"
+    )
 
 
 def _server_params_from_spec(
@@ -183,6 +206,16 @@ async def test_tier1_stdio_configs_execute_real_roundtrip(
 @pytest.mark.asyncio
 async def test_tier1_claude_code_plugin_manifest_executes_real_roundtrip(tmp_path: Path) -> None:
     spec = _load_server_spec(ROOT / ".claude-plugin" / "plugin.json")
+
+    # The manifest may declare either transport. When it points Claude Code at
+    # the shared streamable-http daemon there is no per-session subprocess to
+    # round-trip against, so validate the endpoint's shape instead; the stdio
+    # round-trip stays covered by the docs/mcp-configs specs in
+    # test_tier1_stdio_configs_execute_real_roundtrip.
+    if "command" not in spec:
+        _assert_streamable_http_spec(spec)
+        return
+
     params = _server_params_from_spec(
         spec,
         cwd=ROOT,

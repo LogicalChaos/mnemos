@@ -27,10 +27,7 @@
   ],
   "mcpServers": {
     "mnemos": {
-      "command": "python",
-      "args": [
-        "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/run_mnemos_mcp.py"
-      ]
+      "url": "http://127.0.0.1:8765/mcp"
     }
   }
 }

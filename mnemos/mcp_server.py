@@ -261,40 +261,56 @@ def create_mcp_server(host: str = "127.0.0.1", port: int = 8765) -> Any:
         )
     globals()["Context"] = Context
 
+    # NOTE: for the streamable-http transport, the MCP SDK's lowlevel
+    # Server.run() — and therefore this lifespan — is entered once per
+    # client session, not once per process (stdio is the only transport
+    # where "once per process" holds). Cache the engine in this closure so
+    # every session after the first reuses the same MnemosEngine/SQLiteStore
+    # connection and the same in-memory episodic buffer, instead of leaking
+    # a new sqlite3 connection per session and resetting sleep-consolidation
+    # state to empty on every reconnect.
+    engine_box: dict[str, MnemosEngine] = {}
+    engine_lock = asyncio.Lock()
+
     @asynccontextmanager
     async def mnemos_lifespan(server: FastMCP) -> AsyncIterator[MnemosContext]:
-        """Initialize the MnemosEngine on startup, clean up on shutdown."""
+        """Initialize the MnemosEngine once per process, share across sessions."""
         _ = server
-        try:
-            engine = MnemosEngine(
-                config=_build_config(),
-                llm=_build_llm_provider(),
-                embedder=_build_embedder(),
-                store=_build_store(),
-            )
-        except Exception as exc:
-            raise RuntimeError(_format_startup_error(exc)) from exc
-        health = run_health_checks(default_store_type="memory")
-        log_event(
-            "mnemos.startup",
-            transport="mcp_stdio",
-            status=health["status"],
-            profile=health["profile"],
-            store_type=health["store_type"],
-            llm_provider=health["llm_provider"],
-            embedding_provider=health["embedding_provider"],
-        )
-        if health["status"] != "ready":
-            log_event(
-                "mnemos.degraded_mode",
-                transport="mcp_stdio",
-                status=health["status"],
-                summary=health["summary"],
-            )
+        async with engine_lock:
+            engine = engine_box.get("engine")
+            if engine is None:
+                try:
+                    engine = MnemosEngine(
+                        config=_build_config(),
+                        llm=_build_llm_provider(),
+                        embedder=_build_embedder(),
+                        store=_build_store(),
+                    )
+                except Exception as exc:
+                    raise RuntimeError(_format_startup_error(exc)) from exc
+                engine_box["engine"] = engine
+                health = run_health_checks(default_store_type="memory")
+                log_event(
+                    "mnemos.startup",
+                    transport="mcp_stdio",
+                    status=health["status"],
+                    profile=health["profile"],
+                    store_type=health["store_type"],
+                    llm_provider=health["llm_provider"],
+                    embedding_provider=health["embedding_provider"],
+                )
+                if health["status"] != "ready":
+                    log_event(
+                        "mnemos.degraded_mode",
+                        transport="mcp_stdio",
+                        status=health["status"],
+                        summary=health["summary"],
+                    )
         try:
             yield MnemosContext(engine=engine)
         finally:
-            # Future: clean up additional long-lived runtime resources here.
+            # engine is a process-wide singleton shared across sessions —
+            # do not close its store here, only on actual process shutdown.
             pass
 
     mcp = FastMCP(
